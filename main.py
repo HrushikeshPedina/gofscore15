@@ -1,128 +1,179 @@
 import streamlit as st
 import openpyxl
 from openpyxl import Workbook
-import pandas as pd
 from io import BytesIO
+import pandas as pd
 
-st.set_page_config(page_title="Golf Score Calculator (15 Holes)", layout="wide")
 
-# Custom CSS for background and styling
-st.markdown("""
-    <style>
-    .main {
-        background-image: url("https://images.unsplash.com/photo-1590411842264-749b748b570e");
-        background-size: cover;
-        background-position: center;
-        background-attachment: fixed;
-    }
-    .block-container {
-        background-color: rgba(255, 255, 255, 0.85);
-        padding: 2rem;
-        border-radius: 10px;
-    }
-    </style>
-""", unsafe_allow_html=True)
+# -----------------------------
+# Helper Functions
+# -----------------------------
+def stableford_points(par, score):
+    diff = score - par
+    if diff >= 2:
+        return 0
+    elif diff == 1:
+        return 1
+    elif diff == 0:
+        return 2
+    elif diff == -1:
+        return 3
+    elif diff == -2:
+        return 4
+    else:
+        return 5
 
-st.title("🏌️‍♂️ Golf Score Calculator (System 36 - 15 Holes)")
 
-uploaded_file = st.file_uploader("Upload Excel Scorecard", type=["xlsx"])
-
-def calculate_system_36_15hole(pars, scores):
-    points = []
-    total_points = 0
-    gross_score = sum(scores)
-
-    for score, par in zip(scores, pars):
-        if score <= par:
-            point = 2
-        elif score == par + 1:
-            point = 1
-        else:
-            point = 0
-        points.append(point)
-        total_points += point
-
-    # Adjust System 36 formula for 15 holes (proportional to 18 holes)
-    handicap = round((18 / 15) * (18 - total_points), 1)
-    net_score = gross_score - handicap
-
+def double_peoria_15(pars, scores, ref_holes):
+    gross = sum(scores)
+    selected_adjustments = [scores[i - 1] - pars[i - 1] for i in ref_holes]
+    peoria_handicap = sum(selected_adjustments) * 1.5
+    handicap = round(peoria_handicap, 1)
+    hole_points = [stableford_points(par, score) for par, score in zip(pars, scores)]
+    total_points = sum(hole_points)
     return {
-        "gross_score": gross_score,
-        "total_points": total_points,
+        "gross": gross,
         "handicap": handicap,
-        "net_score": net_score,
-        "points": points
+        "net": gross - handicap,
+        "hole_points": hole_points,
+        "total_points": total_points,
     }
 
-def process_scorecard_with_summary(input_bytes):
-    wb_in = openpyxl.load_workbook(BytesIO(input_bytes))
+
+def process_scorecard(file_bytes, ref_holes):
+    wb_in = openpyxl.load_workbook(BytesIO(file_bytes))
     ws_in = wb_in.active
 
-    # Read 15 holes (rows 2 to 16)
+    hole_numbers = [ws_in.cell(row=i, column=1).value for i in range(2, 17)]
     pars = [ws_in.cell(row=i, column=2).value for i in range(2, 17)]
-    player_names = [ws_in.cell(row=1, column=col).value for col in range(3, ws_in.max_column + 1)]
+    player_names = [ws_in.cell(row=1, column=j).value for j in range(3, ws_in.max_column + 1)]
 
+    summary = []
     wb_out = Workbook()
     ws_out = wb_out.active
-    ws_out.title = "Player Scores"
-
-    current_row = 1
-    comparison_data = []
+    ws_out.title = "Results"
+    row = 1
 
     for idx, col in enumerate(range(3, ws_in.max_column + 1)):
         name = player_names[idx]
         scores = [ws_in.cell(row=i, column=col).value for i in range(2, 17)]
-        result = calculate_system_36_15hole(pars, scores)
+        result = double_peoria_15(pars, scores, ref_holes)
 
-        ws_out.cell(row=current_row, column=1, value=name)
-        current_row += 1
-
-        headers = ["Hole", "Par", "Score", "System 36 Points"]
-        for j, header in enumerate(headers, start=1):
-            ws_out.cell(row=current_row, column=j, value=header)
-        current_row += 1
-
+        ws_out.cell(row=row, column=1, value=name)
+        row += 1
+        ws_out.append(["Hole", "Par", "Score", "Stableford Points"])
         for i in range(15):
-            ws_out.cell(row=current_row, column=1, value=i + 1)
-            ws_out.cell(row=current_row, column=2, value=pars[i])
-            ws_out.cell(row=current_row, column=3, value=scores[i])
-            ws_out.cell(row=current_row, column=4, value=result["points"][i])
-            current_row += 1
+            ws_out.append([hole_numbers[i], pars[i], scores[i], result["hole_points"][i]])
+        row = ws_out.max_row + 1
+        ws_out.append(["Gross Score", result["gross"]])
+        ws_out.append(["Handicap (Double Peoria)", result["handicap"]])
+        ws_out.append(["Net Score", result["net"]])
+        ws_out.append(["Total Stableford Points", result["total_points"]])
+        row = ws_out.max_row + 2
 
-        for label, value in [
-            ("Gross Score", result["gross_score"]),
-            ("System 36 Points", result["total_points"]),
-            ("Handicap (Adj. System 36)", result["handicap"]),
-            ("Net Score", result["net_score"])
-        ]:
-            ws_out.cell(row=current_row, column=1, value=label)
-            ws_out.cell(row=current_row, column=2, value=value)
-            current_row += 1
-
-        current_row += 1
-        comparison_data.append({
-            "name": name,
-            "gross": result["gross_score"],
-            "points": result["total_points"],
-            "handicap": result["handicap"],
-            "net": result["net_score"]
+        summary.append({
+            "Player": name,
+            "Gross": result["gross"],
+            "Handicap": result["handicap"],
+            "Net": result["net"],
+            "Stableford Points": result["total_points"]
         })
 
-    # Sort and output comparison summary
-    comparison_data.sort(key=lambda x: x["net"])
-    ws_out.cell(row=current_row, column=1, value="Final Comparison")
-    current_row += 1
-    ws_out.append(["Player", "Gross Score", "System 36 Points", "Handicap", "Net Score"])
-    for player in comparison_data:
-        ws_out.append([player["name"], player["gross"], player["points"], player["handicap"], player["net"]])
+    # ---- Rankings ----
+    min_gross = min(p["Gross"] for p in summary)
+    best_gross_players = [p for p in summary if p["Gross"] == min_gross]
 
+    group_best = []
+    for i in range(0, len(summary), 4):
+        group = summary[i:i + 4]
+        min_group_gross = min(p["Gross"] for p in group)
+        best_in_group = [p for p in group if p["Gross"] == min_group_gross]
+        group_best.append(best_in_group)
+
+    top_stableford = sorted(summary, key=lambda x: x["Stableford Points"], reverse=True)[:10]
+
+    # ---- Write Summary ----
+    ws_out.append(["🏁 Tournament Summary"])
+    ws_out.append(["Player", "Gross", "Handicap", "Net", "Stableford Points"])
+    for s in summary:
+        ws_out.append([s["Player"], s["Gross"], s["Handicap"], s["Net"], s["Stableford Points"]])
+
+    ws_out.append([])
+    ws_out.append(["🏆 Overall Best Gross Score"])
+    for p in best_gross_players:
+        ws_out.append([p["Player"], p["Gross"]])
+
+    ws_out.append([])
+    ws_out.append(["🥇 Best Gross from Each Group of 4"])
+    for idx, group in enumerate(group_best, start=1):
+        for g in group:
+            ws_out.append([f"Group {idx}", g["Player"], g["Gross"]])
+
+    ws_out.append([])
+    ws_out.append(["🏅 Top 10 Stableford Players"])
+    for idx, t in enumerate(top_stableford, start=1):
+        ws_out.append([f"#{idx}", t["Player"], t["Stableford Points"]])
+
+    # ---- Create output bytes ----
     output = BytesIO()
     wb_out.save(output)
     output.seek(0)
-    return output
+    return summary, best_gross_players, group_best, top_stableford, output
+
+
+# -----------------------------
+# Streamlit App
+# -----------------------------
+st.set_page_config(page_title="Golf Tournament Calculator", layout="wide")
+
+st.title("🏌️‍♂️ Double Peoria Stableford Calculator (15 Holes)")
+
+uploaded_file = st.file_uploader("📤 Upload Scorecard Excel (15 Holes)", type=["xlsx"])
 
 if uploaded_file:
-    with st.spinner("Processing 15-hole scorecard..."):
-        output = process_scorecard_with_summary(uploaded_file.read())
-        st.success("✅ File processed successfully!")
-        st.download_button("📥 Download 15-Hole Results", data=output, file_name="Processed_Golf_Scores_15_Holes.xlsx")
+    st.success("✅ File uploaded successfully!")
+
+    st.markdown("### 🎯 Select 10 Peoria Holes")
+    cols = st.columns(5)
+    selected_holes = []
+    for i in range(15):
+        with cols[i % 5]:
+            if st.checkbox(f"Hole {i+1}", value=False):
+                selected_holes.append(i + 1)
+
+    if st.button("🚀 Calculate Results"):
+        if len(selected_holes) != 10:
+            st.error("❌ Please select exactly 10 Peoria holes.")
+        else:
+            with st.spinner("Processing results..."):
+                summary, best_gross_players, group_best, top_stableford, output = process_scorecard(
+                    uploaded_file.read(), selected_holes
+                )
+
+            st.success("✅ Results calculated!")
+
+            st.subheader("🏁 Tournament Summary")
+            df_summary = pd.DataFrame(summary)
+            st.dataframe(df_summary, use_container_width=True)
+
+            st.subheader("🏆 Overall Best Gross Score (With Ties)")
+            for p in best_gross_players:
+                st.write(f"- **{p['Player']}** — {p['Gross']}")
+
+            st.subheader("🥇 Best Gross from Each Group of 4")
+            for idx, group in enumerate(group_best, start=1):
+                st.write(f"**Group {idx}:** " + ", ".join(f"{g['Player']} ({g['Gross']})" for g in group))
+
+            st.subheader("🏅 Top 10 Stableford Players")
+            df_top10 = pd.DataFrame(top_stableford)
+            st.table(df_top10)
+
+            st.download_button(
+                label="📥 Download Full Results Excel",
+                data=output,
+                file_name="Golf_Results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+else:
+    st.info("Please upload a 15-hole Excel scorecard to begin.")
