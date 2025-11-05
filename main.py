@@ -98,4 +98,90 @@ def process_excel(file_bytes, ref_holes):
         best_in_group = [p for p in group if p["Gross"] == min_group_gross]
         group_best.append(best_in_group)
 
-    top_stableford = sorted(summary, key=lambda x: x["Stableford]()_
+    top_stableford = sorted(summary, key=lambda x: x["Stableford Points"], reverse=True)[:10]
+
+    # Summary sheet
+    ws_out.append(["🏁 Tournament Summary"])
+    ws_out.append(["Player", "Gross", "Handicap", "Net", "Stableford Points"])
+    for s in summary:
+        ws_out.append([s["Player"], s["Gross"], s["Handicap"], s["Net"], s["Stableford Points"]])
+
+    ws_out.append([])
+    ws_out.append(["🏆 Overall Best Gross Score"])
+    for p in best_gross_players:
+        ws_out.append([p["Player"], p["Gross"]])
+
+    ws_out.append([])
+    ws_out.append(["🥇 Best Gross from Each Group of 4"])
+    for idx, group in enumerate(group_best, start=1):
+        for g in group:
+            ws_out.append([f"Group {idx}", g["Player"], g["Gross"]])
+
+    ws_out.append([])
+    ws_out.append(["🏅 Top 10 Stableford Players"])
+    for idx, t in enumerate(top_stableford, start=1):
+        ws_out.append([f"#{idx}", t["Player"], t["Stableford Points"]])
+
+    output = BytesIO()
+    wb_out.save(output)
+    output.seek(0)
+
+    return summary, best_gross_players, group_best, top_stableford, output
+
+
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
+st.set_page_config(page_title="Golf Tournament Calculator", layout="wide")
+
+st.title("🏌️‍♂️ Double Peoria Stableford Calculator (15 Holes)")
+
+uploaded_file = st.file_uploader("📤 Upload Scorecard Excel File", type=["xlsx"])
+
+if uploaded_file:
+    st.success("✅ File uploaded successfully!")
+    st.markdown("### 🎯 Select 10 Peoria Holes")
+
+    cols = st.columns(5)
+    selected_holes = []
+    for i in range(15):
+        with cols[i % 5]:
+            if st.checkbox(f"Hole {i + 1}", value=False):
+                selected_holes.append(i + 1)
+
+    if st.button("🚀 Calculate Results"):
+        if len(selected_holes) != 10:
+            st.error("❌ Please select exactly 10 Peoria holes.")
+        else:
+            with st.spinner("Processing..."):
+                summary, best_gross_players, group_best, top_stableford, output = process_excel(
+                    uploaded_file.read(), selected_holes
+                )
+
+            st.success("✅ Results calculated successfully!")
+
+            st.subheader("🏁 Tournament Summary")
+            df_summary = pd.DataFrame(summary)
+            st.dataframe(df_summary, use_container_width=True)
+
+            st.subheader("🏆 Overall Best Gross Score")
+            for p in best_gross_players:
+                st.write(f"- **{p['Player']}** — {p['Gross']}")
+
+            st.subheader("🥇 Best Gross from Each Group of 4")
+            for idx, group in enumerate(group_best, start=1):
+                st.write(f"**Group {idx}:** " + ", ".join(f"{g['Player']} ({g['Gross']})" for g in group))
+
+            st.subheader("🏅 Top 10 Stableford Players")
+            df_top10 = pd.DataFrame(top_stableford)
+            st.table(df_top10)
+
+            st.download_button(
+                label="📥 Download Results Excel File",
+                data=output,
+                file_name="golf_results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+else:
+    st.info("Please upload your scorecard to continue.")
