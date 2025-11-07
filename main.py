@@ -27,7 +27,7 @@ def stableford_points(par, score):
 # ✅ UPDATED: Peoria → Stroke distribution → Adjusted Stableford
 def double_peoria_15(pars, scores, stroke_index, ref_holes):
 
-    # ----- 1. Normal Peoria calculation (unchanged) -----
+    # ----- 1. Normal Peoria calculation -----
     gross = sum(scores)
     selected_adjustments = [scores[i - 1] - pars[i - 1] for i in ref_holes]
     peoria_handicap = sum(selected_adjustments) * 1.5
@@ -110,6 +110,8 @@ def process_excel(file_bytes, ref_holes):
             "Stableford Points": result["total_points"]
         })
 
+    # ----- Summary Rankings -----
+
     min_gross = min(p["Gross"] for p in summary)
     best_gross_players = [p for p in summary if p["Gross"] == min_gross]
 
@@ -122,6 +124,13 @@ def process_excel(file_bytes, ref_holes):
 
     top_stableford = sorted(summary, key=lambda x: x["Stableford Points"], reverse=True)[:10]
 
+    # ✅ NEW: Top 5 Best Net (lowest wins)
+    top_net = sorted(summary, key=lambda x: x["Net"])[:5]
+
+    # ✅ NEW: Top 5 Best Handicap (lowest first)
+    top_handicap = sorted(summary, key=lambda x: x["Handicap"])[:5]
+
+    # ----- Write Summary -----
     ws_out.append(["🏁 Tournament Summary"])
     ws_out.append(["Player", "Gross", "Handicap", "Net", "Stableford Points"])
     for s in summary:
@@ -143,11 +152,23 @@ def process_excel(file_bytes, ref_holes):
     for idx, t in enumerate(top_stableford, start=1):
         ws_out.append([f"#{idx}", t["Player"], t["Stableford Points"]])
 
+    # ✅ NEW: Write Top 5 Net
+    ws_out.append([])
+    ws_out.append(["🥈 Top 5 Best Net Scores"])
+    for idx, t in enumerate(top_net, start=1):
+        ws_out.append([f"#{idx}", t["Player"], t["Net"]])
+
+    # ✅ NEW: Write Top 5 Best Handicap
+    ws_out.append([])
+    ws_out.append(["🎖 Top 5 Best Handicaps (Lowest First)"])
+    for idx, t in enumerate(top_handicap, start=1):
+        ws_out.append([f"#{idx}", t["Player"], t["Handicap"]])
+
     output = BytesIO()
     wb_out.save(output)
     output.seek(0)
 
-    return summary, best_gross_players, group_best, top_stableford, output
+    return summary, best_gross_players, group_best, top_stableford, top_net, top_handicap, output
 
 
 # -----------------------------
@@ -210,7 +231,7 @@ if uploaded_file:
             st.error("❌ Please select exactly 10 Peoria holes.")
         else:
             with st.spinner("Processing tournament results..."):
-                summary, best_gross_players, group_best, top_stableford, output = process_excel(
+                summary, best_gross_players, group_best, top_stableford, top_net, top_handicap, output = process_excel(
                     uploaded_file.read(), selected_holes
                 )
 
@@ -262,6 +283,15 @@ if uploaded_file:
             st.subheader("🏅 Top 10 Stableford Players")
             df_top10 = pd.DataFrame(top_stableford)
             st.table(df_top10)
+
+            # ✅ NEW OUTPUTS
+            st.subheader("🥈 Top 5 Best Net Scores")
+            df_top_net = pd.DataFrame(top_net)
+            st.table(df_top_net)
+
+            st.subheader("🎖 Top 5 Best Handicaps (Lowest First)")
+            df_top_handicap = pd.DataFrame(top_handicap)
+            st.table(df_top_handicap)
 
             st.download_button(
                 label="📥 Download Full Results (Excel)",
