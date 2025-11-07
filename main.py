@@ -98,7 +98,8 @@ def process_workbook_bytes(xls_bytes, peoria_holes):
     pars = [ws.cell(row=i, column=2).value for i in range(2, 17)]
     stroke_idx = [ws.cell(row=i, column=3).value for i in range(2, 17)]
 
-    players = [ws.cell(row=1, col).value for col in range(4, ws.max_column + 1)]
+    players = [ws.cell(row=1, column=col).value for col in range(4, ws.max_column + 1)]
+
     results = []
 
     for col_idx, col in enumerate(range(4, ws.max_column + 1)):
