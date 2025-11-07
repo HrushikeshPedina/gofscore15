@@ -1,39 +1,45 @@
+# golf_peoria_modern.py
 import streamlit as st
 import pandas as pd
 import openpyxl
 from openpyxl import Workbook
-import io
-import matplotlib.pyplot as plt
+from io import BytesIO
+import plotly.express as px
 
-st.set_page_config(page_title="Golf Tournament – Double Peoria", layout="wide")
+st.set_page_config(page_title="Peoria Stableford — Modern Dashboard", layout="wide")
 
-# ---------------------------------------------
-# PAGE STYLE (Dark Blue + White Text)
-# ---------------------------------------------
-st.markdown("""
+# -------------------------------
+# Styling (dark navy theme)
+# -------------------------------
+st.markdown(
+    """
     <style>
-        body, .stApp {
-            background-color: #001F3F !important;
-            color: white !important;
-        }
-        .stButton>button {
-            background-color: #004080;
-            color: white;
-            border-radius: 8px;
-            border: 1px solid #1E90FF;
-        }
-        .stDownloadButton>button {
-            background-color: #0066CC;
-            color: white;
-            border-radius: 8px;
-        }
+    .stApp, .main {
+      background-color: #051826;
+      color: #FFFFFF;
+    }
+    .block-container {
+      background-color: rgba(5, 24, 38, 0.98);
+      color: #FFFFFF;
+      padding: 1.25rem;
+      border-radius: 12px;
+    }
+    h1, h2, h3 { color: #FFD966 !important; }
+    .stButton>button, .stDownloadButton>button {
+      background-color: #FFD966 !important;
+      color: #052235 !important;
+      font-weight: 600;
+      border-radius: 8px;
+    }
+    .stCheckbox>label { color: #FFFFFF !important; }
     </style>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True
+)
 
-# ---------------------------------------------
-# STABLEFORD CALCULATION
-# ---------------------------------------------
-def stableford_points(par, net_score):
+# -------------------------------
+# Helper functions
+# -------------------------------
+def stableford_points_from_net(par, net_score):
     diff = net_score - par
     if diff >= 2:
         return 0
@@ -48,199 +54,323 @@ def stableford_points(par, net_score):
     else:
         return 5
 
-# ---------------------------------------------
-# DOUBLE PEORIA WITH HANDICAP DISTRIBUTION
-# ---------------------------------------------
-def double_peoria_calculation(pars, stroke_index, scores, peoria_holes):
-    gross = sum(scores)
+def compute_peoria_allowance_float(pars, scores, ref_holes):
+    """Compute Peoria allowance as float: sum(score-par) on ref holes * 1.5"""
+    adjustments = []
+    for h in ref_holes:
+        idx = h - 1
+        adjustments.append(scores[idx] - pars[idx])
+    return sum(adjustments) * 1.5
 
-    # Peoria selected hole adjustments
-    adjustments = [(scores[i - 1] - pars[i - 1]) for i in peoria_holes]
-    peoria_handicap = round(sum(adjustments) * 1.5, 1)
-    total_handicap_strokes = int(round(peoria_handicap))
+def allocate_strokes(handicap_int, stroke_indexes):
+    """
+    Distribute integer strokes across 15 holes based on stroke index.
+    stroke_indexes is length-15 list with values 1..15 (1 hardest).
+    Allocate base = H // 15 to all holes, then remainder to holes with smallest stroke_index.
+    Returns list length 15 with per-hole allocated strokes.
+    """
+    H = max(0, int(round(handicap_int)))
+    base = H // 15
+    rem = H % 15
+    alloc = [base] * 15
+    if rem > 0:
+        # give +1 to holes with stroke_index 1..rem
+        for i, si in enumerate(stroke_indexes):
+            if si <= rem:
+                alloc[i] += 1
+    return alloc
 
-    # Stroke distribution based on difficulty
-    strokes_per_hole = [0] * 15
-    idx_sorted = sorted(range(15), key=lambda i: stroke_index[i])
-
-    stroke_count = total_handicap_strokes
-    while stroke_count > 0:
-        for idx in idx_sorted:
-            strokes_per_hole[idx] += 1
-            stroke_count -= 1
-            if stroke_count == 0:
-                break
-
-    # Net scores and Stableford points
-    net_scores = [scores[i] - strokes_per_hole[i] for i in range(15)]
-    points = [stableford_points(pars[i], net_scores[i]) for i in range(15)]
-
-    return {
-        "gross": gross,
-        "handicap": peoria_handicap,
-        "net_total": gross - peoria_handicap,
-        "hole_net_scores": net_scores,
-        "hole_points": points,
-        "total_points": sum(points),
-        "strokes_per_hole": strokes_per_hole
-    }
-
-
-# ---------------------------------------------
-# PROCESS WORKBOOK
-# ---------------------------------------------
-def process_workbook_bytes(xls_bytes, peoria_holes):
-
-    wb = openpyxl.load_workbook(io.BytesIO(xls_bytes))
+# -------------------------------
+# Processing workbook
+# -------------------------------
+def process_workbook_bytes(file_bytes, selected_peoria_holes):
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
     ws = wb.active
 
-    hole_numbers = [ws.cell(row=i, column=1).value for i in range(2, 17)]
-    pars = [ws.cell(row=i, column=2).value for i in range(2, 17)]
-    stroke_idx = [ws.cell(row=i, column=3).value for i in range(2, 17)]
+    # Read hole rows 2..16 (15 holes)
+    hole_nums = [ws.cell(row=r, column=1).value for r in range(2, 17)]
+    pars = [ws.cell(row=r, column=2).value for r in range(2, 17)]
+    stroke_idx = [ws.cell(row=r, column=3).value for r in range(2, 17)]
 
-    players = [ws.cell(row=1, column=col).value for col in range(4, ws.max_column + 1)]
+    # Validate stroke index
+    if not all(isinstance(si, int) and 1 <= si <= 15 for si in stroke_idx):
+        raise ValueError("Stroke_Index values must be integers 1..15 for each hole (rows 2..16).")
 
-    results = []
+    # Player names from header row 1, columns 4..
+    player_cols = list(range(4, ws.max_column + 1))
+    player_names = [ws.cell(row=1, column=c).value or f"Player_{i+1}" for i, c in enumerate(player_cols)]
 
-    for col_idx, col in enumerate(range(4, ws.max_column + 1)):
-        name = players[col_idx]
-        scores = [ws.cell(row=i, column=col).value for i in range(2, 17)]
+    # Build long-form rows: player x hole
+    rows = []
+    players_detail = []  # will store per-player detail dicts
+    for i_col, col in enumerate(player_cols):
+        name = player_names[i_col]
+        # read scores (rows 2..16)
+        scores = [ws.cell(row=r, column=col).value for r in range(2, 17)]
+        scores = [int(s) for s in scores]  # assume valid ints
 
-        r = double_peoria_calculation(pars, stroke_idx, scores, peoria_holes)
+        # compute peoria allowance float
+        peoria_float = compute_peoria_allowance_float(pars, scores, selected_peoria_holes)
+        peoria_int = int(round(peoria_float)) if peoria_float >= 0 else 0
 
-        results.append({
+        # allocate strokes
+        strokes_alloc = allocate_strokes(peoria_int, stroke_idx)
+
+        # per-hole net and stableford
+        net_scores = [scores[h] - strokes_alloc[h] for h in range(15)]
+        stableford_per_hole = [stableford_points_from_net(pars[h], net_scores[h]) for h in range(15)]
+
+        gross = sum(scores)
+        net_total = sum(net_scores)
+        total_stableford = sum(stableford_per_hole)
+
+        # append detail rows
+        for h in range(15):
+            rows.append({
+                "Player": name,
+                "Hole": hole_nums[h],
+                "Par": pars[h],
+                "Stroke_Index": stroke_idx[h],
+                "Gross_Score": scores[h],
+                "Strokes_Allocated": strokes_alloc[h],
+                "Net_Score": net_scores[h],
+                "Stableford": stableford_per_hole[h]
+            })
+
+        players_detail.append({
             "Player": name,
-            "Gross": r["gross"],
-            "Handicap": r["handicap"],
-            "Net_Total": r["net_total"],
-            "Total_Stableford": r["total_points"],
-            "Raw": r
+            "Scores": scores,
+            "Strokes_Allocated": strokes_alloc,
+            "Net_Per_Hole": net_scores,
+            "Stableford_Per_Hole": stableford_per_hole,
+            "Peoria_Float": round(peoria_float, 2),
+            "Peoria_Int": peoria_int,
+            "Gross": gross,
+            "Net_Total": net_total,
+            "Total_Stableford": total_stableford
         })
 
-    # Rankings
-    best_gross = min(r["Gross"] for r in results)
-    best_gross_players = [r for r in results if r["Gross"] == best_gross]
+    # create DataFrame long form
+    df_long = pd.DataFrame(rows)
 
+    # summary
+    summary_rows = []
+    for pdict in players_detail:
+        summary_rows.append({
+            "Player": pdict["Player"],
+            "Gross": pdict["Gross"],
+            "Peoria_Int": pdict["Peoria_Int"],
+            "Net_Total": pdict["Net_Total"],
+            "Stableford": pdict["Total_Stableford"]
+        })
+    df_summary = pd.DataFrame(summary_rows)
+
+    # Rankings
+    # Best gross (ties)
+    min_gross = df_summary["Gross"].min()
+    best_gross_players = df_summary[df_summary["Gross"] == min_gross]
+
+    # Best gross per group of 4
     group_best = []
-    for i in range(0, len(results), 4):
-        group = results[i:i+4]
-        best = min(r["Gross"] for r in group)
-        winners = [r for r in group if r["Gross"] == best]
+    for i in range(0, len(df_summary), 4):
+        grp = df_summary.iloc[i:i+4]
+        if grp.empty:
+            continue
+        m = grp["Gross"].min()
+        winners = grp[grp["Gross"] == m]
         group_best.append(winners)
 
-    top_stableford = sorted(results, key=lambda x: x["Total_Stableford"], reverse=True)[:10]
-    top_5_net = sorted(results, key=lambda x: x["Net_Total"])[:5]
+    top_stableford = df_summary.sort_values("Stableford", ascending=False).head(10)
+    top_5_net = df_summary.sort_values("Net_Total", ascending=True).head(5)
 
-    # OUTPUT EXCEL
+    # Build Excel report (bytes)
     wb_out = Workbook()
-    ws_out = wb_out.active
-    ws_out.title = "Results"
+    ws_det = wb_out.active
+    ws_det.title = "PerPlayerDetails"
 
-    ws_out.append(["Player", "Gross", "Handicap", "Net", "Stableford Points"])
-    for r in results:
-        ws_out.append([r["Player"], r["Gross"], r["Handicap"], r["Net_Total"], r["Total_Stableford"]])
+    # Header row for details
+    header = ["Player", *[f"H{h}" for h in range(1,16)]]
+    # Scores
+    ws_det.append(["Players & Gross Scores"] + [""] * 15)
+    for p in players_detail:
+        ws_det.append([p["Player"]] + p["Scores"])
+    ws_det.append([])
+    # Strokes allocated
+    ws_det.append(["Strokes Allocated"] + [""] * 15)
+    for p in players_detail:
+        ws_det.append([p["Player"]] + p["Strokes_Allocated"])
+    ws_det.append([])
+    # Net per hole
+    ws_det.append(["Net Scores"] + [""] * 15)
+    for p in players_detail:
+        ws_det.append([p["Player"]] + p["Net_Per_Hole"])
+    ws_det.append([])
+    # Stableford per hole
+    ws_det.append(["Stableford (Net)"] + [""] * 15)
+    for p in players_detail:
+        ws_det.append([p["Player"]] + p["Stableford_Per_Hole"])
+    # Summary sheet
+    ws_sum = wb_out.create_sheet("Summary")
+    ws_sum.append(["Player", "Gross", "Peoria_Int", "Net_Total", "Stableford"])
+    for _, r in df_summary.iterrows():
+        ws_sum.append([r["Player"], r["Gross"], r["Peoria_Int"], r["Net_Total"], r["Stableford"]])
+    ws_sum.append([])
+    ws_sum.append(["Best Gross (ties)"])
+    for _, r in best_gross_players.iterrows():
+        ws_sum.append([r["Player"], r["Gross"]])
+    ws_sum.append([])
+    ws_sum.append(["Top 10 Stableford"])
+    for i, r in enumerate(top_stableford.itertuples(index=False), start=1):
+        ws_sum.append([i, r.Player, r.Stableford])
+    ws_sum.append([])
+    ws_sum.append(["Top 5 Net"])
+    for i, r in enumerate(top_5_net.itertuples(index=False), start=1):
+        ws_sum.append([i, r.Player, r.Net_Total])
 
-    ws_out.append([])
-    ws_out.append(["Overall Best Gross"])
-    for bg in best_gross_players:
-        ws_out.append([bg["Player"], bg["Gross"]])
-
-    ws_out.append([])
-    ws_out.append(["Best by Group of 4"])
-    for g_idx, grp in enumerate(group_best, start=1):
-        for p in grp:
-            ws_out.append([f"Group {g_idx}", p["Player"], p["Gross"]])
-
-    ws_out.append([])
-    ws_out.append(["Top 10 Stableford"])
-    for i, p in enumerate(top_stableford, start=1):
-        ws_out.append([i, p["Player"], p["Total_Stableford"]])
-
-    ws_out.append([])
-    ws_out.append(["Top 5 Net Score"])
-    for i, p in enumerate(top_5_net, start=1):
-        ws_out.append([i, p["Player"], p["Net_Total"]])
-
-    out_bytes = io.BytesIO()
+    out_bytes = BytesIO()
     wb_out.save(out_bytes)
     out_bytes.seek(0)
 
     return {
-        "results": results,
-        "best_gross": best_gross_players,
+        "df_long": df_long,
+        "df_summary": df_summary,
+        "players_detail": players_detail,
+        "best_gross_players": best_gross_players,
         "group_best": group_best,
         "top_stableford": top_stableford,
         "top_5_net": top_5_net,
         "excel_bytes": out_bytes
     }
 
+# -------------------------------
+# Streamlit UI layout
+# -------------------------------
+st.title("⛳ Peoria Stableford — Modern Dashboard (Option B)")
 
-# ---------------------------------------------
-# STREAMLIT APP LAYOUT
-# ---------------------------------------------
-st.title("🏌️ Double Peoria Stableford – 15 Holes Tournament")
-st.subheader("Dark Blue Theme • Handicap Distribution • Stableford Charts")
+st.markdown("Upload a 15-hole scorecard Excel with columns: **Hole | Par | Stroke_Index | Player1 | Player2 | ...** (Hole rows: 1–15 in rows 2–16).")
 
-file = st.file_uploader("Upload Score Sheet (Excel – score_card_new.xlsx)", type=["xlsx"])
-
-peoria_holes = st.multiselect(
-    "Select 10 Peoria Holes",
-    list(range(1, 16)),
-    max_selections=10
-)
-
-if len(peoria_holes) != 10:
-    st.warning("Please select exactly **10 holes**.")
+uploaded = st.file_uploader("Upload score_card_new.xlsx", type=["xlsx"])
+if not uploaded:
+    st.info("Please upload the scorecard Excel file to begin.")
     st.stop()
 
-if file:
-    result = process_workbook_bytes(file.read(), peoria_holes)
+# preview uploaded file top rows
+try:
+    wb_preview = openpyxl.load_workbook(BytesIO(uploaded.read()), data_only=True)
+    ws_preview = wb_preview.active
+    headers = [ws_preview.cell(row=1, column=c).value or f"Col{c}" for c in range(1, ws_preview.max_column+1)]
+    preview_rows = []
+    for r in range(1, 17):  # header + 15 holes
+        preview_rows.append([ws_preview.cell(row=r, column=c).value for c in range(1, ws_preview.max_column+1)])
+    df_preview = pd.DataFrame(preview_rows, columns=headers)
+    st.subheader("📋 Uploaded File Preview (first 16 rows)")
+    st.dataframe(df_preview, use_container_width=True)
+except Exception as e:
+    st.error(f"Failed to preview uploaded file: {e}")
+    st.stop()
 
-    st.success("✅ Processing Completed!")
+st.markdown("### 🎯 Select exactly 10 Peoria holes (these are the 10 holes used to calculate Peoria allowance)")
+selected_holes = st.multiselect("Choose 10 holes", options=list(range(1,16)))
+if len(selected_holes) != 10:
+    st.warning("Please select exactly 10 holes to continue.")
+    st.stop()
 
-    # -----------------------------
-    # SUMMARY TABLE
-    # -----------------------------
-    df = pd.DataFrame([
-        {
-            "Player": r["Player"],
-            "Gross": r["Gross"],
-            "Handicap": r["Handicap"],
-            "Net Score": r["Net_Total"],
-            "Stableford": r["Total_Stableford"]
-        }
-        for r in result["results"]
-    ])
+# Process
+with st.spinner("Calculating..."):
+    try:
+        uploaded.seek(0)
+        result = process_workbook_bytes(uploaded.read(), selected_holes)
+    except Exception as e:
+        st.error(f"Processing failed: {e}")
+        st.stop()
 
-    st.subheader("📊 Player Summary")
-    st.dataframe(df)
+# Display summary and long table
+st.success("✅ Calculations complete!")
 
-    # -----------------------------
-    # TOP 5 NET SCORE
-    # -----------------------------
-    st.subheader("🔵 Top 5 Net Score (Lower is Better)")
-    df_net = pd.DataFrame([
-        {"Rank": i+1, "Player": p["Player"], "Net Score": p["Net_Total"]}
-        for i, p in enumerate(result["top_5_net"])
-    ])
-    st.table(df_net)
+# two-column top summary + leaderboards
+colA, colB = st.columns([2,1])
 
-    # -----------------------------
-    # SIMPLE CHART – Stableford
-    # -----------------------------
-    st.subheader("📈 Stableford Points Chart")
+with colA:
+    st.subheader("🏁 Player Summary")
+    df_sum_disp = result["df_summary"].sort_values("Stableford", ascending=False).reset_index(drop=True)
+    st.dataframe(df_sum_disp.style.format({"Gross": "{:.0f}", "Net_Total":"{:.0f}", "Stableford":"{:.0f}"}), use_container_width=True)
 
-    fig, ax = plt.subplots()
-    ax.bar(df["Player"], df["Stableford"])
-    plt.xticks(rotation=45)
-    st.pyplot(fig)
+with colB:
+    st.subheader("🏆 Leaderboards")
+    st.markdown("**Best Gross (ties)**")
+    for _, r in result["best_gross_players"].iterrows():
+        st.write(f"- **{r.Player}** — Gross {r.Gross}")
+    st.markdown("**Top 10 Stableford**")
+    st.table(result["top_stableford"].reset_index(drop=True))
+    st.markdown("**Top 5 Net**")
+    st.table(result["top_5_net"].reset_index(drop=True))
 
-    # -----------------------------
-    # DOWNLOAD OUTPUT
-    # -----------------------------
-    st.download_button(
-        "📥 Download Tournament Report (Excel)",
-        data=result["excel_bytes"],
-        file_name="tournament_results.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+# Unified hole-by-hole table (Option B)
+st.subheader("📖 Hole-by-Hole (Unified Table)")
+df_long_display = result["df_long"].copy()
+# reorder columns for clarity
+df_long_display = df_long_display[["Player","Hole","Par","Stroke_Index","Gross_Score","Strokes_Allocated","Net_Score","Stableford"]]
+st.dataframe(df_long_display, use_container_width=True)
+
+# Charts: Gross / Stableford / Net (side-by-side)
+st.subheader("📊 Visual Analysis")
+df_chart = result["df_summary"].copy()
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    fig_gross = px.bar(df_chart, x="Player", y="Gross", text="Gross", color="Gross", color_continuous_scale="Blues")
+    fig_gross.update_layout(template="plotly_dark", paper_bgcolor="#051826", plot_bgcolor="#051826", title_font_color="#FFD966", font_color="white")
+    st.plotly_chart(fig_gross, use_container_width=True)
+with c2:
+    fig_net = px.bar(df_chart, x="Player", y="Net_Total", text="Net_Total", color="Net_Total", color_continuous_scale="Cividis")
+    fig_net.update_layout(template="plotly_dark", paper_bgcolor="#051826", plot_bgcolor="#051826", title_font_color="#FFD966", font_color="white")
+    st.plotly_chart(fig_net, use_container_width=True)
+with c3:
+    fig_sf = px.bar(df_chart, x="Player", y="Stableford", text="Stableford", color="Stableford", color_continuous_scale="Viridis")
+    fig_sf.update_layout(template="plotly_dark", paper_bgcolor="#051826", plot_bgcolor="#051826", title_font_color="#FFD966", font_color="white")
+    st.plotly_chart(fig_sf, use_container_width=True)
+
+# Hole-by-hole aggregate: average Stableford per hole across players
+st.subheader("📈 Hole-by-Hole Aggregate (Average Stableford per Hole)")
+df_hole_agg = df_long_display.groupby("Hole").agg(
+    Avg_Stableford=("Stableford","mean"),
+    Avg_Net=("Net_Score","mean"),
+    Avg_Gross=("Gross_Score","mean")
+).reset_index()
+fig_hole = px.line(df_hole_agg, x="Hole", y=["Avg_Stableford","Avg_Net","Avg_Gross"], markers=True,
+                   labels={"value":"Average", "variable":"Metric"}, title="Averages per Hole")
+fig_hole.update_layout(template="plotly_dark", paper_bgcolor="#051826", plot_bgcolor="#051826", title_font_color="#FFD966", font_color="white")
+st.plotly_chart(fig_hole, use_container_width=True)
+
+# Expandable per-player detail (still provide expanders, though main table exists)
+st.subheader("🔎 Expandable Player Details")
+for p in result["players_detail"]:
+    with st.expander(p["Player"], expanded=False):
+        df_p = pd.DataFrame({
+            "Hole": list(range(1,16)),
+            "Par": p["Scores"] and result["df_long"].loc[result["df_long"]["Player"]==p["Player"], "Par"].unique().tolist() or [],
+            "Gross": p["Scores"],
+            "Strokes_Allocated": p["Strokes_Allocated"],
+            "Net": p["Net_Per_Hole"],
+            "Stableford": p["Stableford_Per_Hole"]
+        })
+        st.dataframe(df_p, use_container_width=True)
+        # per-player charts
+        fig_line = px.line(df_p, x="Hole", y=["Gross","Net"], markers=True, title=f"{p['Player']} — Gross vs Net")
+        fig_line.update_layout(template="plotly_dark", paper_bgcolor="#051826", plot_bgcolor="#051826", title_font_color="#FFD966", font_color="white")
+        st.plotly_chart(fig_line, use_container_width=True)
+        fig_bar = px.bar(df_p, x="Hole", y="Stableford", text="Stableford", title=f"{p['Player']} — Stableford per Hole")
+        fig_bar.update_layout(template="plotly_dark", paper_bgcolor="#051826", plot_bgcolor="#051826", title_font_color="#FFD966", font_color="white")
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+# Best gross per group (display)
+st.subheader("🥇 Best Gross by Group of 4 (ties allowed)")
+for gi, grp in enumerate(result["group_best"], start=1):
+    st.write(f"Group {gi}: " + ", ".join(f"{row.Player} ({row.Gross})" for _, row in grp.iterrows()))
+
+# Download full results excel
+st.markdown("### 📥 Download full Excel report")
+st.download_button("Download Excel Report", data=result["excel_bytes"].getvalue(), file_name="peoria_stableford_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+st.markdown("---")
+st.caption("Peoria Stableford calculations: allowance computed on selected 10 holes as sum(score-par)*1.5; integer allowance distributed to holes by Stroke_Index (1 = hardest). Stableford uses net score (gross - strokes allocated).")
